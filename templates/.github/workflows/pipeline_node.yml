@@ -1,0 +1,131 @@
+name: Default Pipeline
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: [ ubuntu-latest ]
+    outputs:
+      matrix_node: ${{ steps.set-matrix-node.outputs.matrix }}
+      env_name: ${{ steps.branch_check.outputs.env_name }}
+      account: ${{ steps.branch_check.outputs.account }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: List node files
+        id: set-matrix-node
+        working-directory: src/lambdas/node
+        run: |
+          arr="["; for i in $(ls -d *); do arr="$arr\"$i\","; done; arr="${arr::-1}]"
+          echo "::set-output name=matrix::$arr"
+
+  build-node:
+    runs-on: [ ubuntu-latest ]
+    environment: 
+      name: ${{ needs.setup.outputs.env_name }}
+    needs: [setup]
+    strategy:
+      matrix:
+        lambdas: ${{fromJson(needs.setup.outputs.matrix_node)}}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup node
+        uses: actions/setup-node@v2
+        with:
+          node: "12.x"
+
+      - name: Show environment
+        run: echo "Building for ${{ needs.setup.outputs.env_name }}"
+
+      - name: Copy to build directory
+        run: |
+          mkdir -p build/lambdas
+          cp -r src/lambdas/node/${{ matrix.lambdas }} build/lambdas/${{ matrix.lambdas }}
+
+      - name: Install dependencies (if package.json exists)
+        run: |
+          if [ -f "build/lambdas/${{ matrix.lambdas }}/package.json" ]; then
+            npm install --prefix build/lambdas/${{ matrix.lambdas }}
+          fi
+
+      - name: Build TS
+        working-directory: build/lambdas/${{ matrix.lambdas }}
+        run: |
+          if [ -f "tsconfig.json" ]; then
+            npm run build
+          fi
+
+      - name: Setup zip
+        run: sudo apt-get install zip
+
+      - name: Zip file
+        working-directory: build/lambdas/${{ matrix.lambdas }}
+        run: |
+          zip -r ${{ matrix.lambdas }}.zip *
+          cp ${{ matrix.lambdas }}.zip ../
+      
+      - name: Clean up
+        run: |
+          rm -rf build/lambdas/${{ matrix.lambdas }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@master
+        with:
+          name: build
+          path: build
+  
+  terraform:
+    runs-on: [ ubuntu-latest ]
+    container:
+      image: hashicorp/terraform:1.1.9    
+    needs: [build-node, setup]
+    environment: 
+      name: ${{ needs.setup.outputs.env_name }}
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Download artifacts
+        uses: actions/download-artifact@master
+        with:
+          name: build
+          path: build
+
+
+      - name: Get AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: us-east-1
+
+      - name: Verify Terraform version
+        working-directory: terraform
+        run: terraform --version
+
+      - name: Terraform init
+        working-directory: terraform
+        run: | 
+          terraform init -backend-config "bucket={backend_bucket}" 
+
+      - name: Terraform validation
+        working-directory: terraform
+        run: terraform validate
+
+      # - name: terraform destroy
+      #   working-directory: terraform
+      #   run: terraform destroy -auto-approve
+
+      # - name: Terraform unlock
+      #   working-directory: terraform
+      #   run: terraform force-unlock -force 0fbaefbe-3a8c-a789-f75a-bb5fdb257aa2
+
+      - name: Terraform plan
+        working-directory: terraform
+        run: terraform plan --out=tfplan 
+
+      - name: Terraform apply
+        working-directory: terraform
+        run: terraform apply tfplan

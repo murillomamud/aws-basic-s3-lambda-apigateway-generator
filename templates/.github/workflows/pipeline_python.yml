@@ -1,0 +1,131 @@
+name: Default Pipeline
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: [ ubuntu-latest ]
+    outputs:
+      matrix_python: ${{ steps.set-matrix-python.outputs.matrix }}
+      env_name: ${{ steps.branch_check.outputs.env_name }}
+      account: ${{ steps.branch_check.outputs.account }}
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: List python files
+        id: set-matrix-python
+        working-directory: src/lambdas/python
+        run: |
+          arr="["; for i in $(ls -d *); do arr="$arr\"$i\","; done; arr="${arr::-1}]"
+          echo "::set-output name=matrix::$arr"
+
+
+  build-python:
+    runs-on: [ ubuntu-latest ]
+    environment: 
+      name: ${{ needs.setup.outputs.env_name }}
+    needs: [setup]
+    container:
+      image: python:3.7-slim    
+    strategy:
+      matrix:
+        lambdas: ${{fromJson(needs.setup.outputs.matrix_python)}}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Show environment
+        run: echo "Building for ${{ needs.setup.outputs.env_name }}"
+
+      - name: Copy to build directory
+        run: |
+          mkdir -p build/lambdas
+          cp -r src/lambdas/python/${{ matrix.lambdas }} build/lambdas/${{ matrix.lambdas }}
+
+      - name: Setup dependencies
+        run: apt-get update && apt-get install zip wget -y
+
+      - name: Install dependencies (if requirements.txt exists)
+        run: |
+          if [ -f "build/lambdas/${{ matrix.lambdas }}/requirements.txt" ]; then
+            pip install -r build/lambdas/${{ matrix.lambdas }}/requirements.txt -t build/lambdas/${{ matrix.lambdas }}/lib
+          fi
+
+      - name: Run manual steps (if manual_steps.sh exists)
+        run: |
+          if [ -f "build/lambdas/${{ matrix.lambdas }}/manual_steps.sh" ]; then
+            cd build/lambdas/${{ matrix.lambdas }}
+            chmod +x manual_steps.sh
+            ./manual_steps.sh
+          fi
+
+      - name: Zip file
+        working-directory: build/lambdas/${{ matrix.lambdas }}
+        run: |
+          zip -r ${{ matrix.lambdas }}.zip *
+          cp ${{ matrix.lambdas }}.zip ../
+      
+      - name: Clean up
+        run: |
+          rm -rf build/lambdas/${{ matrix.lambdas }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@master
+        with:
+          name: build
+          path: build
+  
+  terraform:
+    runs-on: [ ubuntu-latest ]
+    container:
+      image: hashicorp/terraform:1.1.9    
+    needs: [build-python, setup]
+    environment: 
+      name: ${{ needs.setup.outputs.env_name }}
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Download artifacts
+        uses: actions/download-artifact@master
+        with:
+          name: build
+          path: build
+
+
+      - name: Get AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: us-east-1
+
+      - name: Verify Terraform version
+        working-directory: terraform
+        run: terraform --version
+
+      - name: Terraform init
+        working-directory: terraform
+        run: | 
+          terraform init -backend-config "bucket={backend_bucket}" 
+
+      - name: Terraform validation
+        working-directory: terraform
+        run: terraform validate
+
+      # - name: terraform destroy
+      #   working-directory: terraform
+      #   run: terraform destroy -auto-approve        
+
+      # - name: Terraform unlock
+      #   working-directory: terraform
+      #   run: terraform force-unlock -force 0fbaefbe-3a8c-a789-f75a-bb5fdb257aa2
+
+      - name: Terraform plan
+        working-directory: terraform
+        run: terraform plan --out=tfplan 
+
+      - name: Terraform apply
+        working-directory: terraform
+        run: terraform apply tfplan
