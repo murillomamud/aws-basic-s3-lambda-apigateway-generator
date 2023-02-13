@@ -17,7 +17,7 @@ npm install
 ### Clone the repository
 
 ``` bash
-git clone
+git clone https://github.com/murillomamud/aws-basic-s3-lambda-apigateway-generator.git
 ```
 
 ### To install it globally, run the following command:
@@ -26,18 +26,10 @@ git clone
 npm install aws-basic-s3-lambda-apigateway-generator -g
 ```
 
-Then, run the following command to start the application:
+Then, run the following command to start the application in same directory where you cloned the repo:
 
 ``` bash
 aws-basic-s3-lambda-apigateway-generator
-```
-
-### To run it by cloning the repo:
-
-Run the following command to start the application:
-
-``` bash
-npm start
 ```
 
 The application will prompt you for the following information:
